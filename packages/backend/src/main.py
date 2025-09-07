@@ -56,21 +56,43 @@ async def calculate_moving(request: MovingRequest):
                 helpersCount=result["helpers_count"],
             )
 
+
 @app.get("/api/get-route")
 async def get_route(fromZip: str, toZip: str):
     async with aiohttp.ClientSession() as session:
-        geo_url = f"https://nominatim.openstreetmap.org/search?format=json&postalcode={fromZip}&country=USA"
-        async with session.get(geo_url) as geo_response:
-            geo_data = await geo_response.json()
-            start = {"lat": float(geo_data[0]["lat"]), "lon": float(geo_data[0]["lon"])}
+        # Геокодирование ZIP-кодов через OpenRouteService
+        ors_key = os.getenv("API_ORS")
+        geo_url_from = f"https://api.openrouteservice.org/geocode/search?api_key={ors_key}&text={fromZip}&boundary.country=US"
+        geo_url_to = f"https://api.openrouteservice.org/geocode/search?api_key={ors_key}&text={toZip}&boundary.country=US"
 
-        geo_url = f"https://nominatim.openstreetmap.org/search?format=json&postalcode={toZip}&country=USA"
-        async with session.get(geo_url) as geo_response:
+        async with session.get(geo_url_from) as geo_response:
             geo_data = await geo_response.json()
-            end = {"lat": float(geo_data[0]["lat"]), "lon": float(geo_data[0]["lon"])}
+            start = geo_data['features'][0]['geometry']['coordinates']  # [lon, lat]
 
-        route_url = f"http://router.project-osrm.org/route/v1/driving/{start['lon']},{start['lat']};{end['lon']},{end['lat']}?geometries=geojson"
-        async with session.get(route_url) as route_response:
+        async with session.get(geo_url_to) as geo_response:
+            geo_data = await geo_response.json()
+            end = geo_data['features'][0]['geometry']['coordinates']  # [lon, lat]
+
+        # Запрос маршрута через OpenRouteService Directions API
+        route_url = "https://api.openrouteservice.org/v2/directions/driving-car"
+        headers = {"Authorization": ors_key, "Content-Type": "application/json"}
+        payload = {
+            "coordinates": [start, end]
+        }
+
+        async with session.post(route_url, json=payload, headers=headers) as route_response:
+            if route_response.status != 200:
+                # Fallback: если сервис недоступен, возвращаем только точки
+                return {
+                    "start": {"lat": start[1], "lon": start[0]},
+                    "end": {"lat": end[1], "lon": end[0]},
+                    "polyline": []
+                }
             route_data = await route_response.json()
-            polyline = route_data["routes"][0]["geometry"]["coordinates"]
-            return {"start": start, "end": end, "polyline": [[lat, lon] for lon, lat in polyline]}
+            geometry = route_data['routes'][0]['geometry']
+            # polyline может быть в формате encoded, декодировать на фронте через leaflet-polyline
+            return {
+                "start": {"lat": start[1], "lon": start[0]},
+                "end": {"lat": end[1], "lon": end[0]},
+                "polyline": geometry
+            }
